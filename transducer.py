@@ -1,8 +1,8 @@
 import nemo.collections.asr as nemo_asr
 from nemo.core.classes import ModelPT, Exportable
-model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_large")
-
-
+#model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_large")
+model=nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_conformer_ctc_large")
+#model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_citrinet_256_ls")
 import glob
 import json
 import os
@@ -39,7 +39,7 @@ def parse_arguments():
     parser.add_argument('--audio_dir', type=str, default=None, required=False, help='Path to the test audio file')
     parser.add_argument('--audio_type', type=str, default='wav', help='File format of audio')
 
-    #parser.add_argument('--export', action='store_true', help="Whether to export the model into onnx prior to eval")
+    parser.add_argument('--export', action='store_true', help="Whether to export the model into onnx prior to eval")
     parser.add_argument('--max_symbold_per_step', type=int, default=5, required=False, help='Number of decoding steps')
     parser.add_argument('--batch_size', type=int, default=32, help='Batchsize')
     parser.add_argument('--log', action='store_true', help='Log the predictions between pytorch and onnx')
@@ -70,14 +70,14 @@ def assert_args(args):
     if int(args.max_symbold_per_step) < 1:
         raise ValueError("`max_symbold_per_step` must be an integer > 0")
 
-'''
+
 def export_model_if_required(args, nemo_model):
     if args.export:
         nemo_model.export("temp_rnnt.onnx")
         args.onnx_encoder = "encoder-temp_rnnt.onnx"
         args.onnx_decoder = "decoder_joint-temp_rnnt.onnx"
 
-'''
+
 def resolve_audio_filepaths(args):
     # get audio filenames
     if args.audio_dir is not None:
@@ -114,7 +114,7 @@ def main():
     if torch.cuda.is_available():
         nemo_model = nemo_model.to('cuda')
 
-    #export_model_if_required(args, nemo_model)
+    export_model_if_required(args, nemo_model)
 
     # Instantiate RNNT Decoding loop
     encoder_model = args.onnx_encoder
@@ -156,7 +156,7 @@ def main():
             hypotheses = decoding(audio_signal=processed_audio, length=processed_audio_len)
 
             # Process hypothesis (map char/subword token ids to text)
-            #hypotheses = nemo_model.decoding.decode_hypothesis(hypotheses,fold_consecutive=True)  # type: List[str]
+            hypotheses = nemo_model.decoding.decode_hypothesis(hypotheses)  # type: List[str]
             
             for hyp in hypotheses:
                 hypothesis_text = hyp.text
