@@ -1,7 +1,7 @@
 import nemo.collections.asr as nemo_asr
 from nemo.core.classes import ModelPT, Exportable
-#model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_large")
-model=nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_conformer_ctc_large")
+model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_large")
+#model=nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_conformer_ctc_large")
 #model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_citrinet_256_ls")
 import glob
 import json
@@ -18,6 +18,7 @@ from nemo.collections.asr.parts.submodules.rnnt_greedy_decoding import ONNXGreed
 from nemo.utils import logging
 import onnxoptimizer
 import onnx
+import csv
 
 
 
@@ -94,6 +95,23 @@ def resolve_audio_filepaths(args):
 
     return filepaths
 
+def get_audio_paths(csv_file):
+  """Gets the paths of the audio files in a CSV file.
+  Args:
+    csv_file: The path to the CSV file.
+  Returns:
+    A list of the paths of the audio files.
+  """
+  with open(csv_file, "r") as f:
+    reader = csv.reader(f)
+    audio_paths = []
+    next(reader)
+    for row in reader:
+      audio_filename = row[0]
+      audio_paths.append("/training-1/asr/mls/mls_english_opus/test/audio/10611/10308/"+audio_filename)
+  return audio_paths
+
+
 def main():
     args = parse_arguments()
 
@@ -122,12 +140,10 @@ def main():
     max_symbols_per_step = args.max_symbold_per_step
     decoding = ONNXGreedyBatchedRNNTInfer(encoder_model, decoder_model, max_symbols_per_step)
 
-    audio_filepath = "2086-149220-0033.wav"
+    audio_filepath = get_audio_paths("test.csv")
 
     # Evaluate Pytorch Model (CPU/GPU)
-    actual_transcripts = nemo_model.transcribe([audio_filepath], batch_size=args.batch_size)[0]
-    
-
+    actual_transcripts = nemo_model.transcribe(audio_filepath, batch_size=args.batch_size)[0]
     # Evaluate ONNX model
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, 'manifest.json'), 'w', encoding='utf-8') as fp:
@@ -160,7 +176,6 @@ def main():
             
             for hyp in hypotheses:
                 hypothesis_text = hyp.text
-                all_hypothesis.append(hypothesis_text)
 
             # Extract text from the hypothesis
             texts = [h.text for h in hypotheses]
@@ -177,13 +192,10 @@ def main():
         print()
 
     # Measure error rate between onnx and pytorch transcipts
-    print(all_hypothesis)
-    print(actual_transcripts)
     pt_onnx_cer = word_error_rate(all_hypothesis, actual_transcripts, use_cer=True)
     assert pt_onnx_cer < args.threshold, "Threshold violation!"
 
     print("Character error rate between Pytorch and ONNX:", pt_onnx_cer)
-
 
 if __name__ == '__main__':
     main()
