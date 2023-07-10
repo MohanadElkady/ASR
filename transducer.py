@@ -1,8 +1,6 @@
 import nemo.collections.asr as nemo_asr
 from nemo.core.classes import ModelPT, Exportable
-model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_large")
-#model=nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_conformer_ctc_large")
-#model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_citrinet_256_ls")
+from jiwer import cer
 import glob
 import json
 import os
@@ -18,7 +16,12 @@ from nemo.collections.asr.parts.submodules.rnnt_greedy_decoding import ONNXGreed
 from nemo.utils import logging
 import onnxoptimizer
 import onnx
-import csv
+import mutagen
+from mutagen.wave import WAVE
+import time
+
+#model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_large")
+model = nemo_asr.models.EncDecRNNTBPEModel.from_pretrained("nvidia/stt_en_conformer_transducer_xlarge")
 
 
 
@@ -95,21 +98,16 @@ def resolve_audio_filepaths(args):
 
     return filepaths
 
-def get_audio_paths(csv_file):
-  """Gets the paths of the audio files in a CSV file.
-  Args:
-    csv_file: The path to the CSV file.
-  Returns:
-    A list of the paths of the audio files.
-  """
-  with open(csv_file, "r") as f:
-    reader = csv.reader(f)
-    audio_paths = []
-    next(reader)
-    for row in reader:
-      audio_filename = row[0]
-      audio_paths.append("/training-1/asr/mls/mls_english_opus/test/audio/10611/10308/"+audio_filename)
-  return audio_paths
+# function to convert the information into 
+# some readable format
+def audio_duration(length):
+    hours = length // 3600  # calculate in hours
+    length %= 3600
+    mins = length // 60  # calculate in minutes
+    length %= 60
+    seconds = length  # calculate in seconds
+    total_duration = hours * 3600 + mins * 60 + seconds
+    return float(total_duration)
 
 
 def main():
@@ -140,50 +138,76 @@ def main():
     max_symbols_per_step = args.max_symbold_per_step
     decoding = ONNXGreedyBatchedRNNTInfer(encoder_model, decoder_model, max_symbols_per_step)
 
-    audio_filepath = get_audio_paths("test.csv")
+    audios = ["sample1.wav","sample2.wav","sample3.wav"]
+    actual_transcripts= []
+    all_hypothesis = []
+    
 
-    # Evaluate Pytorch Model (CPU/GPU)
-    actual_transcripts = nemo_model.transcribe(audio_filepath, batch_size=args.batch_size)[0]
-    # Evaluate ONNX model
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with open(os.path.join(tmpdir, 'manifest.json'), 'w', encoding='utf-8') as fp:
-            entry = {'audio_filepath': audio_filepath, 'duration': 100000, 'text': 'nothing'}
-            fp.write(json.dumps(entry) + '\n')
-
-        config = {'paths2audio_files': [audio_filepath], 'batch_size': args.batch_size, 'temp_dir': tmpdir}
-
-        nemo_model.preprocessor.featurizer.dither = 0.0
-        nemo_model.preprocessor.featurizer.pad_to = 0
-
-        temporary_datalayer = nemo_model._setup_transcribe_dataloader(config)
-
-        all_hypothesis = []
+  
+    for i in range(len(audios)):
+        audio_filepath = audios[i]
         
-        for test_batch in tqdm(temporary_datalayer, desc="ONNX Transcribing"):
-            input_signal, input_signal_length = test_batch[0], test_batch[1]
-            input_signal = input_signal.to('cuda:0')
-            input_signal_length = input_signal_length.to('cuda:0')
+        #Create a wave object of the audio file
+        audio = WAVE(audio_filepath)
+        
+        # contains all the metadata about the wavpack file
+        audio_info = audio.info
+        length = int(audio_info.length)
+        res = audio_duration(length)
+        
+        
 
-            # Acoustic features
-            processed_audio, processed_audio_len = nemo_model.preprocessor(
-                input_signal=input_signal, length=input_signal_length
-            )
-            # RNNT Decoding loop
-            hypotheses = decoding(audio_signal=processed_audio, length=processed_audio_len)
+        # Evaluate ONNX model
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, 'manifest.json'), 'w', encoding='utf-8') as fp:
+                entry = {'audio_filepath': audio_filepath, 'duration': 100000, 'text': 'nothing'}
+                fp.write(json.dumps(entry) + '\n')
 
-            # Process hypothesis (map char/subword token ids to text)
-            hypotheses = nemo_model.decoding.decode_hypothesis(hypotheses)  # type: List[str]
+            config = {'paths2audio_files': [audio_filepath], 'batch_size': args.batch_size, 'temp_dir': tmpdir}
+
+            nemo_model.preprocessor.featurizer.dither = 0.0
+            nemo_model.preprocessor.featurizer.pad_to = 0
+
+            temporary_datalayer = nemo_model._setup_transcribe_dataloader(config)
+
             
-            for hyp in hypotheses:
-                hypothesis_text = hyp.text
+      
+            for test_batch in tqdm(temporary_datalayer, desc="ONNX Transcribing"):
+                input_signal, input_signal_length = test_batch[0], test_batch[1]
+                input_signal = input_signal.to('cuda:0')
+                input_signal_length = input_signal_length.to('cuda:0')
 
-            # Extract text from the hypothesis
-            texts = [h.text for h in hypotheses]
+                # Acoustic features
+                processed_audio, processed_audio_len = nemo_model.preprocessor(
+                    input_signal=input_signal, length=input_signal_length
+                )
+                # RNNT Decoding loop
+                startonnx = time.time()
+                hypotheses = decoding(audio_signal=processed_audio, length=processed_audio_len)
 
-            all_hypothesis += texts
-            del processed_audio, processed_audio_len
-            del test_batch
-    	
+                # Process hypothesis (map char/subword token ids to text)
+                hypotheses = nemo_model.decoding.decode_hypothesis(hypotheses)  # type: List[str]
+                # Extract text from the hypothesis
+                texts = [h.text for h in hypotheses]
+                
+                endonnx = time.time()
+                
+                
+                # Evaluate Pytorch Model (CPU/GPU)
+                startpy = time.time()
+                actual_transcripts += nemo_model.transcribe([audio_filepath], batch_size=args.batch_size)[0]
+                endpy = time.time()
+                all_hypothesis += texts
+                del processed_audio, processed_audio_len
+                del test_batch
+                pytorchtime=round(endpy - startpy, 4)
+                onnxtime=round(endonnx - startonnx, 4)
+                print()
+                print("PyTorch Inference time = ",pytorchtime )
+                print("ONNX Inference time = ", onnxtime) 
+                rtf=onnxtime/res
+                print("RTF =" ,rtf)
+  	
 
     if args.log:
         for pt_transcript, onnx_transcript in zip(actual_transcripts, all_hypothesis):
@@ -193,9 +217,14 @@ def main():
 
     # Measure error rate between onnx and pytorch transcipts
     pt_onnx_cer = word_error_rate(all_hypothesis, actual_transcripts, use_cer=True)
+    cer_error = cer(actual_transcripts, all_hypothesis)
     assert pt_onnx_cer < args.threshold, "Threshold violation!"
 
-    print("Character error rate between Pytorch and ONNX:", pt_onnx_cer)
+    print("Word error rate between Pytorch and ONNX:", pt_onnx_cer)
+    print("Character error rate between Pytorch and ONNX:", cer_error)
+    
+    
+
 
 if __name__ == '__main__':
     main()
